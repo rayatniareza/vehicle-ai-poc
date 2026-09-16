@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Car Position Test</title>
+
+  <!-- TensorFlow.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+
+  <!-- COCO SSD -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #111;
+      color: white;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h2 {
+      margin: 15px;
+    }
+
+    #camera-container {
+      position: relative;
+      width: min(95vw, 900px);
+      background: black;
+      overflow: hidden;
+      border-radius: 12px;
+    }
+
+    video {
+      width: 100%;
+      display: block;
+    }
+
+    canvas {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    #status {
+      margin-top: 15px;
+      padding: 12px 20px;
+      border-radius: 10px;
+      background: #333;
+      font-size: 18px;
+      font-weight: bold;
+    }
+
+    #startBtn {
+      margin: 20px;
+      padding: 12px 25px;
+      font-size: 18px;
+      cursor: pointer;
+      border: 0;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+
+<body>
+
+<h2>تشخیص موقعیت خودرو</h2>
+
+<div id="camera-container">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+</div>
+
+<div id="status">مدل در حال آماده شدن...</div>
+
+<button id="startBtn">شروع دوربین</button>
+
+
+<script>
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+
+  const statusEl = document.getElementById("status");
+  const startBtn = document.getElementById("startBtn");
+
+  let model = null;
+  let running = false;
+
+  // -----------------------------
+  // Load model
+  // -----------------------------
+
+  async function loadModel() {
+
+    statusEl.innerText = "در حال بارگذاری مدل...";
+
+    model = await cocoSsd.load();
+
+    statusEl.innerText = "مدل آماده است";
+
+    console.log("Model loaded");
+  }
+
+
+  // -----------------------------
+  // Start camera
+  // -----------------------------
+
+  async function startCamera() {
+
+    if (!model) {
+      alert("مدل هنوز آماده نشده");
+      return;
+    }
+
+    try {
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+
+        video: {
+          facingMode: {
+            ideal: "environment"
+          },
+
+          width: {
+            ideal: 1280
+          },
+
+          height: {
+            ideal: 720
+          }
+        }
+      });
+
+      video.srcObject = stream;
+
+      video.onloadedmetadata = () => {
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        running = true;
+
+        detect();
+      };
+
+    } catch (error) {
+
+      console.error(error);
+
+      statusEl.innerText =
+        "دسترسی به دوربین امکان‌پذیر نیست";
+    }
+  }
+
+
+  // -----------------------------
+  // Detection loop
+  // -----------------------------
+
+  async function detect() {
+
+    if (!running)
+      return;
+
+    const predictions =
+      await model.detect(video);
+
+    draw(predictions);
+
+    // حدود 5 FPS برای تست
+    setTimeout(detect, 200);
+  }
+
+
+  // -----------------------------
+  // Draw result
+  // -----------------------------
+
+  function draw(predictions) {
+
+    const W = canvas.width;
+    const H = canvas.height;
+
+    ctx.clearRect(0, 0, W, H);
+
+
+    // -------------------------
+    // Target area
+    // -------------------------
+
+    const target = {
+      x: W * 0.15,
+      y: H * 0.15,
+      width: W * 0.70,
+      height: H * 0.70
+    };
+
+
+    // -------------------------
+    // Find vehicle
+    // -------------------------
+
+    const vehicles = predictions
+      .filter(p =>
+        (
+          p.class === "car" ||
+          p.class === "truck" ||
+          p.class === "bus"
+        )
+        &&
+        p.score > 0.55
+      )
+      .sort(
+        (a, b) => b.score - a.score
+      );
+
+
+    const car = vehicles[0];
+
+
+    // -------------------------
+    // No car
+    // -------------------------
+
+    if (!car) {
+
+      drawTarget(target, "red");
+
+      statusEl.innerText =
+        "❌ خودرو پیدا نشد";
+
+      statusEl.style.background = "#b71c1c";
+
+      return;
+    }
+
+
+    const [x, y, w, h] = car.bbox;
+
+
+    // -------------------------
+    // Calculate how much car
+    // is inside target
+    // -------------------------
+
+    const ratio =
+      intersectionRatio(
+        {
+          x,
+          y,
+          width: w,
+          height: h
+        },
+        target
+      );
+
+
+    // حداقل 85٪ خودرو باید داخل کادر باشد
+    const isInside =
+      ratio >= 0.85;
+
+
+    // -------------------------
+    // Target color
+    // -------------------------
+
+    const targetColor =
+      isInside
+        ? "#00ff66"
+        : "#ff3333";
+
+    drawTarget(
+      target,
+      targetColor
+    );
+
+
+    // -------------------------
+    // Car bounding box
+    // -------------------------
+
+    ctx.strokeStyle = targetColor;
+
+    ctx.lineWidth = 6;
+
+    ctx.strokeRect(
+      x,
+      y,
+      w,
+      h
+    );
+
+
+    // label
+
+    ctx.font =
+      "24px sans-serif";
+
+    ctx.fillStyle =
+      targetColor;
+
+    ctx.fillText(
+      `Vehicle ${Math.round(car.score * 100)}%`,
+      x,
+      Math.max(y - 10, 30)
+    );
+
+
+    // -------------------------
+    // Status
+    // -------------------------
+
+    if (isInside) {
+
+      statusEl.innerText =
+        "✅ موقعیت خودرو مناسب است";
+
+      statusEl.style.background =
+        "#087f23";
+
+    } else {
+
+      const direction =
+        getDirection(
+          {
+            x,
+            y,
+            width: w,
+            height: h
+          },
+          target
+        );
+
+      statusEl.innerText =
+        "❌ " + direction;
+
+      statusEl.style.background =
+        "#b71c1c";
+    }
+  }
+
+
+  // -----------------------------
+  // Draw target rectangle
+  // -----------------------------
+
+  function drawTarget(
+    target,
+    color
+  ) {
+
+    ctx.strokeStyle = color;
+
+    ctx.lineWidth = 8;
+
+    ctx.strokeRect(
+      target.x,
+      target.y,
+      target.width,
+      target.height
+    );
+  }
+
+
+  // -----------------------------
+  // Intersection calculation
+  // -----------------------------
+
+  function intersectionRatio(
+    object,
+    target
+  ) {
+
+    const x1 =
+      Math.max(
+        object.x,
+        target.x
+      );
+
+    const y1 =
+      Math.max(
+        object.y,
+        target.y
+      );
+
+    const x2 =
+      Math.min(
+        object.x + object.width,
+        target.x + target.width
+      );
+
+    const y2 =
+      Math.min(
+        object.y + object.height,
+        target.y + target.height
+      );
+
+
+    const intersectionWidth =
+      Math.max(
+        0,
+        x2 - x1
+      );
+
+    const intersectionHeight =
+      Math.max(
+        0,
+        y2 - y1
+      );
+
+
+    const intersectionArea =
+      intersectionWidth *
+      intersectionHeight;
+
+
+    const objectArea =
+      object.width *
+      object.height;
+
+
+    return (
+      intersectionArea /
+      objectArea
+    );
+  }
+
+
+  // -----------------------------
+  // Guidance
+  // -----------------------------
+
+  function getDirection(
+    car,
+    target
+  ) {
+
+    const carCenterX =
+      car.x +
+      car.width / 2;
+
+    const carCenterY =
+      car.y +
+      car.height / 2;
+
+
+    const targetCenterX =
+      target.x +
+      target.width / 2;
+
+    const targetCenterY =
+      target.y +
+      target.height / 2;
+
+
+    const dx =
+      carCenterX -
+      targetCenterX;
+
+    const dy =
+      carCenterY -
+      targetCenterY;
+
+
+    const toleranceX =
+      target.width * 0.08;
+
+    const toleranceY =
+      target.height * 0.08;
+
+
+    if (dx > toleranceX)
+      return "دوربین را کمی به راست ببر →";
+
+    if (dx < -toleranceX)
+      return "دوربین را کمی به چپ ببر ←";
+
+    if (dy > toleranceY)
+      return "دوربین را کمی پایین‌تر ببر ↓";
+
+    if (dy < -toleranceY)
+      return "دوربین را کمی بالاتر ببر ↑";
+
+
+    return "خودرو را کامل داخل کادر قرار بده";
+  }
+
+
+  // -----------------------------
+  // Button
+  // -----------------------------
+
+  startBtn.addEventListener(
+    "click",
+    startCamera
+  );
+
+
+  // Load on startup
+  loadModel();
+
+</script>
+
+</body>
+</html>
